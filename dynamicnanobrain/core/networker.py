@@ -30,11 +30,74 @@ import numpy as np
 NV = 3 # internal voltage degrees of freedom
 
 class Layer :
+    keys = ['Rinh','Rexc','RLED','Rstore','Cinh','Cexc','CLED','Cstore','Cgate','Vt','m','I_Vt','vt','Lg','AB','CB']
+    units = ['Ohm']*4 + ['F']*4 + ['F/cm'] + ['V','dim. less','nA','cm/s','um','uA','1/uA']
+    kT = 0.02585
     """ Base class for the other layers"""
-    def __init__(self, N, layer_type):
+    def __init__(self, N, layer_type, path_to_file):
         self.N = N
         self.layer_type = layer_type
+        self.p_dict = {}
+        self.p_units = {}
+        self.read_parameter_file(path_to_file,self.p_dict, self.p_units)
+        # Transistor linear slope in nA/V
+        self.linslope=self.p_dict['Cgate']*self.p_dict['vt']*1e9 # nA/V
+        self.gammas = self.calc_gammas()
+        self.A = self.calc_A()
+
+    def read_parameter_file(self, path_to_file, p_dict, p_units) :
+        # Read file and then loop through and assign to dict
+        params = np.loadtxt(path_to_file)
+        for k, key in enumerate(self.keys):
+            p_dict[key] = params[k]
+            p_units[key] = self.units[k]
         
+    def calc_A(self,Rstore=None,Cstore=None) :
+        # Calcualte A for the special case of a distribution of Rstore and Cstore, 
+        # or for the object self.gammas
+        if (Rstore is not None) and (Cstore is not None) :
+            new_gammas = self.calc_gammas(Rstore,Cstore)
+            return self.A_mat(*new_gammas[:-1])
+        elif Rstore is not None :
+            new_gammas = self.calc_gammas(Rstore)
+            return self.A_mat(*new_gammas[:-1])
+        else :
+            return self.A_mat(*self.gammas[:-1])    
+
+    def A_mat(self,g11,g22,g13,g23,g33) :
+        gsum = g13+g23+g33
+        A = np.array([[-g11, 0, g11],
+                      [0, -g22, g22],
+                      [g13, g23, -gsum]])
+
+    # Supply the gammas needed for time stepping
+    def calc_gammas(self,Rstore=None,Cstore=None) :
+        # Sum the memory and gate capacitance, convert Lg in um to cm
+        if Cstore is not None:
+            Cmem = self.calc_Cmem(Cstore)
+        else :
+            Cmem = self.calc_Cmem()
+        # System frequencies
+        g11 = 1e-9/self.p_dict['Cinh']/self.p_dict['Rinh'] # ns^-1 # GHz
+        g22 = 1e-9/self.p_dict['Cexc']/self.p_dict['Rexc'] # ns^-1 # GHz
+        g13 = 1e-9/Cmem/self.p_dict['Rinh'] # ns^-1 # GHz
+        g23 = 1e-9/Cmem/self.p_dict['Rexc'] # ns^-1 # GHz
+        if Rstore is not None :
+            g33 = 1e-9/Cmem/Rstore
+        else :
+            g33 = 1e-9/Cmem/self.p_dict['Rstore'] # ns^-1 # GHz
+        gled = 1e-9/self.p_dict['CLED']/self.p_dict['RLED'] # ns^-1 # GHz
+
+        return np.array([g11,g22,g13,g23,g33,gled])
+    
+    def calc_Cmem(self,Cstore=None) :
+        # Sum the memory and gate capacitance, convert Lg in um to cm
+        if Cstore is None :
+            Cmem = self.p_dict['Cstore'] + self.p_dict['Cgate']*self.p_dict['Lg']*1e-4 
+        else :
+            Cmem = Cstore + self.p_dict['Cgate']*self.p_dict['Lg']*1e-4  
+        return Cmem
+
     # TODO: This does not work perfectly for 2 input layers (first hidden layer 'K')
     def get_node_name(self,node_idx,layer_idx=1) :
         if type(layer_idx) is int :
@@ -97,7 +160,7 @@ class HiddenLayer(Layer) :
     
         """
         
-        Layer.__init__(self, N, layer_type='hidden')
+        Layer.__init__(self, N, layer_type='hidden', path_to_file=device)
         # Connections to the outside world
         self.out_channel = output_channel
         # These can be multiple, care taken in the constructing of weights
@@ -118,72 +181,133 @@ class HiddenLayer(Layer) :
         # Sequence of transistor threshold voltages, initialized to None
         self.Vt_vec = None 
         # Device object hold A, for example
-        self.device=device
         self.multiA=multiA
+        
 
     def assign_device(self, device) :
         """ Assing a Device object to all the hidden layer nodes."""
-        self.device=device
         # Setup rule to scale B according to the capacitances
-        self.Bscale=np.diag([1e-18/self.device.p_dict['Cinh'],
-                             1e-18/self.device.p_dict['Cexc'],
+        self.Bscale=np.diag([1e-18/self.p_dict['Cinh'],
+                             1e-18/self.p_dict['Cexc'],
                              0.])
+    
+    def read_parameter_file(self, path_to_file, p_dict, p_units) :
+        # Read file and then loop through and assign to dict
+        params = np.loadtxt(path_to_file)
+        for k, key in enumerate(self.keys):
+            p_dict[key] = params[k]
+            p_units[key] = self.units[k]
         
+    def A_mat(self,g11,g22,g13,g23,g33) :
+        gsum = g13+g23+g33
+        A = np.array([[-g11, 0, g11],
+                      [0, -g22, g22],
+                      [g13, g23, -gsum]])
+    
+        return A
+    
+    def calc_Cmem(self,Cstore=None) :
+        # Sum the memory and gate capacitance, convert Lg in um to cm
+        if Cstore is None :
+            Cmem = self.p_dict['Cstore'] + self.p_dict['Cgate']*self.p_dict['Lg']*1e-4 
+        else :
+            Cmem = Cstore + self.p_dict['Cgate']*self.p_dict['Lg']*1e-4  
+        return Cmem
+
+    # Supply the gammas needed for time stepping
+    def calc_gammas(self,Rstore=None,Cstore=None) :
+        # Sum the memory and gate capacitance, convert Lg in um to cm
+        if Cstore is not None:
+            Cmem = self.calc_Cmem(Cstore)
+        else :
+            Cmem = self.calc_Cmem()
+        # System frequencies
+        g11 = 1e-9/self.p_dict['Cinh']/self.p_dict['Rinh'] # ns^-1 # GHz
+        g22 = 1e-9/self.p_dict['Cexc']/self.p_dict['Rexc'] # ns^-1 # GHz
+        g13 = 1e-9/Cmem/self.p_dict['Rinh'] # ns^-1 # GHz
+        g23 = 1e-9/Cmem/self.p_dict['Rexc'] # ns^-1 # GHz
+        if Rstore is not None :
+            g33 = 1e-9/Cmem/Rstore
+        else :
+            g33 = 1e-9/Cmem/self.p_dict['Rstore'] # ns^-1 # GHz
+        gled = 1e-9/self.p_dict['CLED']/self.p_dict['RLED'] # ns^-1 # GHz
+
+        return np.array([g11,g22,g13,g23,g33,gled])
+
+
+    def calc_A(self,Rstore=None,Cstore=None):
+        # Calcualte A for the special case of a distribution of Rstore and Cstore, 
+        # or for the object self.gammas
+        if (Rstore is not None) and (Cstore is not None) :
+            new_gammas = self.calc_gammas(Rstore,Cstore)
+            return self.A_mat(*new_gammas[:-1])
+        elif Rstore is not None :
+            new_gammas = self.calc_gammas(Rstore)
+            return self.A_mat(*new_gammas[:-1])
+        else :
+            return self.A_mat(*self.gammas[:-1])    
+
     def generate_uniform_Adist(self, scale) :
         """Here we do another variation of the memory constants"""
-        if self.device is None :
+        if self.p_dict is None :
             print("Please first assign a device before generating Adist")
         else :
             A = np.zeros((self.N,3,3))
-            R_ref = self.device.p_dict['Rstore']
-            C_ref = self.device.p_dict['Cstore']
+            R_ref = self.p_dict['Rstore']
+            C_ref = self.p_dict['Cstore']
             rng = np.random.RandomState()
             scale_RC_dist = np.sqrt(rng.uniform(1.0,scale**2,size=self.N))
             for k in range(0,self.N) :
-                A[k] = self.device.calc_A(R_ref*scale_RC_dist[k],C_ref*scale_RC_dist[k])
+                Rstore = R_ref*scale_RC_dist[k]
+                Cstore = C_ref*scale_RC_dist[k]
+                A[k] = self.calc_A(Rstore, Cstore)
             self.Adist = A
     
     def generate_exp_Adist(self, mean) :
-        if self.device is None :
+        if self.p_dict is None :
             print("Please first assign a device before generating Adist")
         else :
             A = np.zeros((self.N,3,3))
-            R_ref = self.device.p_dict['Rstore']
-            C_ref = self.device.p_dict['Cstore']
+            R_ref = self.p_dict['Rstore']
+            C_ref = self.p_dict['Cstore']
             rng = np.random.RandomState()
             scale_RC_dist = np.sqrt(rng.exponential(scale=mean,size=self.N))
             #scale_RC_dist = np.sqrt(rng.uniform(1.0,scale**2,size=self.N))
             for k in range(0,self.N) :
-                A[k] = self.device.calc_A(R_ref*(1+scale_RC_dist[k]),C_ref*(1+scale_RC_dist[k]))
+                Rstore = R_ref*(1+scale_RC_dist[k])
+                Cstore = C_ref*(1+scale_RC_dist[k])
+                A[k] = self.calc_A(Rstore, Cstore)
             self.Adist = A
             
     def generate_poisson_Adist(self, mean) :
-        if self.device is None :
+        if self.p_dict is None :
             print("Please first assign a device before generating Adist")
         else :
             A = np.zeros((self.N,3,3))
-            R_ref = self.device.p_dict['Rstore']
-            C_ref = self.device.p_dict['Cstore']
+            R_ref = self.p_dict['Rstore']
+            C_ref = self.p_dict['Cstore']
             rng = np.random.RandomState()
             scale_RC_dist = np.sqrt(rng.poisson(scale=mean,size=self.N))
             #scale_RC_dist = np.sqrt(rng.uniform(1.0,scale**2,size=self.N))
             for k in range(0,self.N) :
-                A[k] = self.device.calc_A(R_ref*(1+scale_RC_dist[k]),C_ref*(1+scale_RC_dist[k]))
+                Rstore = R_ref*(1+scale_RC_dist[k])
+                Cstore = C_ref*(1+scale_RC_dist[k])
+                A[k] = self.calc_A(Rstore, Cstore)
             self.Adist = A
                 
     def generate_Adist(self,noise=0.1,p_label='Rstore') :
         """At the moment we do only variance in Rstore."""
-        if self.device is None :
+        if self.p_dict is None :
             print("Please first assign a device before generating Adist")
         else :
             A = np.zeros((self.N,3,3))
-            p_ref = self.device.p_dict[p_label] 
+            p_ref = self.p_dict[p_label] 
             rng = np.random.RandomState()
             Rstore_dist = rng.normal(loc=p_ref, scale=noise*p_ref,size=self.N)
             # Clip to avoid negative values
             Rstore_dist = np.clip(Rstore_dist, p_ref*0.01,np.inf)
             for k in range(0,self.N) :
-                A[k] = self.device.calc_A(Rstore_dist[k])
+                A[k] = self.calc_A(Rstore_dist[k])
             self.Adist = A
         
     def specify_Vt(self,Vts) :
@@ -192,7 +316,7 @@ class HiddenLayer(Layer) :
     def get_dV(self, t) :     
         """ Calculate the time derivative."""
         if not self.multiA :
-            self.dV = self.device.A @ self.V + self.Bscale @ self.B
+            self.dV = self.A @ self.V + self.Bscale @ self.B
         else :
             self.dV = np.einsum('jik,kj->ij',self.Adist,self.V) + self.Bscale @ self.B
             
@@ -208,13 +332,51 @@ class HiddenLayer(Layer) :
         self.V = np.clip(self.V,-self.Vthres,self.Vthres)
         return N
     
+    def eta_ABC(self,I) :
+        # calculate efficiency from ABC model
+        # ABC model is in uA, so multiply I by 1e-3
+        return self.ABC(I*1e-3,self.p_dict['AB'],self.p_dict['CB']) 
+    
+    def ABC(self,I,AB,CB) :
+        # ABC model adapted to currents
+        eta = I/(AB + I + CB*I**2)
+        return eta
+    
+    # Supply transistor functionality, the method transistorIV can be ported 
+    def Id_sub(self,Vg,Vt,mask) :
+        return self.p_dict['I_Vt']*np.exp((Vg-Vt[mask])/self.p_dict['m']/self.kT)
+
+    def Id_sat(self,Vg,Vt,mask) :
+        # Invert the mask for this one
+        return self.p_dict['I_Vt'] + self.linslope*(Vg-Vt[mask==False])
+    
+    def Id_sub_0(self,Vg,Vt) :
+        return self.p_dict['I_Vt']*np.exp((Vg-Vt)/self.p_dict['m']/self.kT)
+
+    def Id_sat_0(self,Vg,Vt) :
+        return self.p_dict['I_Vt'] + self.linslope*(Vg-Vt)
+
+    def transistorIV(self,Vg,Vt_vec=None) :
+        """Reads gate voltage and calculated transistor current based on 
+        parameters in p_dict. Can take a vector of individual threshold currents 
+        to introduce fluctuations in the system. Returns current in nA."""
+
+        if Vt_vec is None :
+            Vt = self.p_dict['Vt'] 
+            return np.piecewise(Vg, [Vg<Vt, Vg>=Vt], [self.Id_sub_0, self.Id_sat_0],Vt) 
+        else :
+            Vt = Vt_vec
+            # This should work even when Vt is an array
+            return np.piecewise(Vg, [Vg<Vt, Vg>=Vt], [self.Id_sub, self.Id_sat],Vt,Vg<Vt)   
+    
+
     def update_I(self, dt) :
         """ Using a fixed dt, update the voltages."""
         # Get the source drain current from the transistor IV
-        self.ISD = self.device.transistorIV(self.V[2],self.Vt_vec)
-        self.I += dt*self.device.gammas[-1]*(self.ISD-self.I)
+        self.ISD = self.transistorIV(self.V[2],self.Vt_vec)
+        self.I += dt*self.gammas[-1]*(self.ISD-self.I)
         # Convert current to power through efficiency function
-        self.P = self.I*self.device.eta_ABC(self.I)
+        self.P = self.I*self.eta_ABC(self.I)
     
     def reset_B(self) :
         """ Set elements of matrix B to 0"""
@@ -267,7 +429,7 @@ class HiddenLayer(Layer) :
 # Inherits Layer
 class InputLayer(Layer) :
         
-    def __init__(self, N):
+    def __init__(self, N, path_to_file):
         """
         Constructor for an input layer. Input data set via set_input_func
         method.
@@ -282,13 +444,13 @@ class InputLayer(Layer) :
         None.
 
         """
-        Layer.__init__(self, N, layer_type='input')
+        Layer.__init__(self, N, layer_type='input', path_to_file=path_to_file)
         
         #self.channels = input_channels
         #self.M = len(input_channels)
         #self.start_idx = [int(sum(self.node_structure[:k])) for k in range(self.M+1)]
         self.C = np.zeros((self.N))
-        # These dictonaries hold function handles and arguments
+        # These dictonaries hold function handleks and arguments
         self.input_func_handles={}
         self.input_func_args={}
 
@@ -350,12 +512,12 @@ class InputLayer(Layer) :
 # Inherits Layer    
 class OutputLayer(Layer) :
     
-    def __init__(self, N, teacher_delay=None, nsave=800) :
+    def __init__(self, N, teacher_delay=None, nsave=800, path_to_file='') :
         """
         Constructor for an input layer. 
         
         """
-        Layer.__init__(self, N, layer_type='output')
+        Layer.__init__(self, N, layer_type='output', path_to_file=path_to_file)
         #self.channels = output_channels
         # TODO: Perhaps self.I is not needed anymore, compare input layer
         self.C = np.zeros(self.N)

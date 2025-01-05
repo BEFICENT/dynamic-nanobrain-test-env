@@ -18,6 +18,9 @@
 # %load_ext autoreload
 # %autoreload 2
 
+import sys
+sys.path.append("..")  # Go up one level, outside of tutorials, where dynamicnanobrain / is located
+
 import matplotlib.pyplot as plt
 import time
 
