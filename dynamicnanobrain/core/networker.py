@@ -23,7 +23,7 @@ Notation:
 
 @author: dwinge
 """
-
+import pandas as pd
 import numpy as np
 
 # Global variable
@@ -131,7 +131,78 @@ class Layer :
     
     def reset_B(self) :
         return None
+    
+    def setup_gain (self) :
+        # Setup matrix
+        A = self.A_mat(*self.gammas[:-1])
+        #print('System matrtix A=\n',A)   
+        # Find the eigenvalues
+        v, w = np.linalg.eig(A)
+    
+        # Add our LED system as a pole as well
+        gled = self.gammas[-1]
+        v_add = np.concatenate((v,np.array([-gled])))
+          
+        return v_add
+    
+    def gain(self, s, eigvals, vsat=1e7, Vt_prime=0.) :
+        eigvals = self.setup_gain()
+        # This function needs to change if Vt_prime is not zero
+        if Vt_prime > 0. :
+            print('Values of Vt_prime not equal zero not supported')
+            return 0
+        
+        # Sort the input
+        g11, g22,g13,g23,g33,gled = self.gammas
+        # Get the necessary capacitance values
+        Cexc = self.p_dict['Cexc'] 
+        Cinh = self.p_dict['Cinh'] 
+        Cgate = self.p_dict['Cgate']
+        
+        # Denoninator of expression (shared between G11, G12)
+        denom = np.ones(len(s),dtype=complex)
+        for l in eigvals :
+            denom *= s-l
 
+        # Constant prefactor (shared between G11, G12)
+        prefactor = gled*vsat*Cgate
+        # gammas are in inverse ns so units have to be adjusted
+        # (in the scope of the total expression)
+        prefactor *= 1e-9 # ns to s
+        
+        # Specifying the actual terms
+        G11 = g23*(s+g22)/Cexc * prefactor/denom
+        G12 = -g13*(s+g11)/Cinh * prefactor/denom  
+        
+        return G11, G12
+    
+    def transistorIV_example (self, Vstart=-0.5, Vend=1.0) :
+        # Generate a sample transistor IV, generates data in uA
+        NV = 200
+        
+        Vgate = np.linspace(Vstart, Vend, NV)
+        I = self.transistorIV(Vgate)*1e-3
+        data = np.array([Vgate, I])
+        
+        df = pd.DataFrame(data.transpose(),
+                          columns=['Vgate','Current'])
+        
+        return df
+    
+    def eta_example(self, handle) :
+
+        I = 10**np.linspace(-2,2,num=50) # in uA
+        eta = handle(I*1e3) # ABC expects nA
+        if len(np.atleast_1d(eta)) < len(I) :
+            # eta is a single value
+            eta = eta*np.ones_like(I)
+            
+        data = np.array([I, eta])
+        
+        df = pd.DataFrame(data.transpose(),
+                          columns=['Current (uA)','eta, IQE'])
+        
+        return df
 class HiddenLayer(Layer) :
     
     def __init__(self, N, output_channel, inhibition_channel, excitation_channel, 
@@ -182,14 +253,19 @@ class HiddenLayer(Layer) :
         self.Vt_vec = None 
         # Device object hold A, for example
         self.multiA=multiA
-        
-
-    def assign_device(self, device) :
-        """ Assing a Device object to all the hidden layer nodes."""
-        # Setup rule to scale B according to the capacitances
         self.Bscale=np.diag([1e-18/self.p_dict['Cinh'],
                              1e-18/self.p_dict['Cexc'],
                              0.])
+
+    def inverse_gain_coefficient(self):
+        # Remember nA
+        Rsum=self.p_dict['Rstore']+self.p_dict['Rexc']
+        max_Vg = self.Vthres*self.p_dict['Rstore']/Rsum
+        Iexc = self.Vthres/Rsum*1e9 # nA
+        Isd = self.transistorIV(max_Vg) 
+        Iout = self.eta_ABC(Isd)*Isd
+        return Iexc/Iout, Iexc
+
     
     def read_parameter_file(self, path_to_file, p_dict, p_units) :
         # Read file and then loop through and assign to dict
