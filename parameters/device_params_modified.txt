@@ -1,0 +1,17 @@
+6.667e5 # Rinh
+6.667e5 # Rexc
+6.667e6 # RLED
+2.0e6 # Rstore
+0.3e-15  # Cinh
+0.3e-15  # Cexc
+0.03e-15  # CLED
+0.07e-15 # Cstore
+4.9e-12 # Cgate
+0.153 # Vt
+1.61 # m
+1790 # I_Vt
+1e7 # vt
+0.2 # Lg
+2.23246061e+00 # AB
+3.31605041e-02 # CB
+1.2 # Vthres

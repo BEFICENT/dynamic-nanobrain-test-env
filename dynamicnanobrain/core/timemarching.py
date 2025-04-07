@@ -61,6 +61,7 @@ def evolve(t, layers, dVmax, dtmax) :
             
 def update(dt, t, layers, weights, overshoots=None, unity_coeff=1.0, t0=0.,teacher_forcing=False) :   
     # Time updating sequence
+    
     # Update first all voltages V and reset currents in matrices B
     for key, layer in layers.items() :
         if layer.layer_type == 'hidden' :
